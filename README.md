@@ -7,7 +7,7 @@ A CLI tool that displays network speed test results from Cloudflare's speed test
 
 ## Features
 
-- **Interactive TUI**: Real-time charts and statistics similar to `btop`
+- **Interactive TUI**: Real-time charts and statistics
 - **Speed Tests**: Measures download/upload throughput, idle latency, and loaded latency
 - **History**: View and manage past test results
 - **Export**: Save results as JSON

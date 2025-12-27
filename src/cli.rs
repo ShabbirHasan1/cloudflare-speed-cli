@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 #[derive(Debug, Parser, Clone)]
-#[command(name = "cloudflare-speed-cli", version, about = "Cloudflare-based speed test with optional btop-like TUI")]
+#[command(name = "cloudflare-speed-cli", version, about = "Cloudflare-based speed test with optional TUI")]
 pub struct Cli {
     /// Base URL for the Cloudflare speed test service
     #[arg(long, default_value = "https://speed.cloudflare.com")]
