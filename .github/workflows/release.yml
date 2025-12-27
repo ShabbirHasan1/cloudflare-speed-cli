@@ -105,11 +105,21 @@ jobs:
       - name: Create archive
         shell: bash
         run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          if [ -z "$VERSION" ]; then
+          # Extract version from tag or use manual input
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/v}
+          else
             VERSION=${{ github.event.inputs.version }}
+            # Remove 'v' prefix if present
             VERSION=${VERSION#v}
           fi
+
+          if [ -z "$VERSION" ]; then
+            echo "Error: Version is empty"
+            exit 1
+          fi
+
+          echo "Using version: $VERSION"
 
           # Determine the correct SHA256 command based on OS
           if command -v sha256sum >/dev/null 2>&1; then
