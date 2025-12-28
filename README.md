@@ -76,34 +76,11 @@ JSON output mode:
 cloudflare-speed-cli --json
 ```
 
-## TUI Controls
-
-### Dashboard Tab
-- `q` / `Ctrl-C`: Quit
-- `r`: Rerun test
-- `p`: Pause/Resume
-- `s`: Save JSON to auto-save location
-- `a`: Toggle auto-save
-- `tab`: Switch tabs (Dashboard, History, Help)
-- `?`: Show help
-
-### History Tab
-- `↑/↓` or `j/k`: Navigate through historical runs
-- `e`: Export selected run as JSON (to current directory)
-- `c`: Export selected run as CSV (to current directory)
-- `y`: Copy last exported file path to clipboard
-- `d`: Delete selected history item
-- `tab`: Switch tabs
-
-### Export Options
-
-- **`s` (Save JSON)**: On dashboard, saves the current/last run to the default auto-save location
-- **`e` (Export JSON)**: In history tab, exports the selected historical run as JSON with full absolute path shown
-- **`c` (Export CSV)**: In history tab, exports the selected historical run as CSV with full absolute path shown
-- **`y` (Yank/Copy)**: In history tab, copies the last exported file's absolute path to clipboard
-
-The exported files are saved to the current working directory with filenames based on the test timestamp and measurement ID. The full absolute path is displayed and can be copied to clipboard.
-
 ## Source
 
 Uses endpoints from https://speed.cloudflare.com/
+
+
+## Source
+
+Contributions / comment very much welcomed!
