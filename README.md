@@ -54,10 +54,10 @@ Text output mode:
 cloudflare-speed-cli --text
 ```
 
-JSON output mode:
+To see all options:
 
 ```bash
-cloudflare-speed-cli --json
+cloudflare-speed-cli --help
 ```
 
 ## Source
@@ -66,7 +66,7 @@ Uses endpoints from https://speed.cloudflare.com/
 
 ## Outstanding Issues
 
-* Network information on Windows is incomplete. I haven't used Windows (outside gaming) in many years and unless there's demand for it I likely won't implement this part. Feel free to open a PR or an issue and we can chat. Honestly the only reason there's a Windows binary at all is because ['cargo-dist'](https://github.com/axodotdev/cargo-dist) made it so easy to do so.
+- Network information on Windows is incomplete. I haven't used Windows (outside gaming) in many years and unless there's demand for it I likely won't implement this part. Feel free to open a PR or an issue and we can chat. Honestly the only reason there's a Windows binary at all is because ['cargo-dist'](https://github.com/axodotdev/cargo-dist) made it so easy to do so.
 
 ## Contributing
 
