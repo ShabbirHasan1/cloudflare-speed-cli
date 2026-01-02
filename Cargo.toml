@@ -1,6 +1,6 @@
 [package]
 name = "cloudflare-speed-cli"
-version = "0.4.4"
+version = "0.4.5"
 edition = "2021"
 authors = ["kavehtehrani <codemonkey13x@gmail.com>"]
 description = "CLI tool for Cloudflare speed testing with TUI interface"
@@ -45,4 +45,12 @@ tui = ["dep:ratatui", "dep:crossterm", "dep:arboard"]
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+# Configuration for cargo-deb
+[package.metadata.deb]
+maintainer = "kavehtehrani <codemonkey13x@gmail.com>"
+license-file = ["LICENSE"]
+depends = "$auto"
+section = "utils"
+priority = "optional"
 
