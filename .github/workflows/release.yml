@@ -212,39 +212,40 @@ jobs:
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
 
-build-deb-package:
-  needs:
-    - plan
-  if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' }}
-  runs-on: ubuntu-22.04
+  # Build .deb package for Linux
+  build-deb-package:
+    needs:
+      - plan
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' }}
+    runs-on: ubuntu-22.04
 
-  permissions:
-    contents: write
+    permissions:
+      contents: write
 
-  steps:
-    - uses: actions/checkout@v4
-      with:
-        persist-credentials: false
-        submodules: recursive
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: recursive
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
-    - name: Install cargo-deb
-      uses: baptiste0928/cargo-install@v3
-      with:
-        crate: cargo-deb
+      - name: Install cargo-deb
+        uses: baptiste0928/cargo-install@v3
+        with:
+          crate: cargo-deb
 
-    - name: Build release binary
-      run: cargo build --release
+      - name: Build release binary
+        run: cargo build --release
 
-    - name: Build .deb package
-      run: cargo deb
+      - name: Build .deb package
+        run: cargo deb
 
-    - name: Upload .deb to GitHub Release
-      uses: softprops/action-gh-release@v2
-      with:
-        files: target/debian/*.deb
+      - name: Upload .deb to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/debian/*.deb
 
   # Determines if we should publish/announce
   host:
@@ -252,9 +253,9 @@ build-deb-package:
       - plan
       - build-local-artifacts
       - build-global-artifacts
-      - build-deb-packages
+      - build-deb-package
     # Only run if we're "publishing", and only if plan, local, global, and deb didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.build-deb-packages.result == 'skipped' || needs.build-deb-packages.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.build-deb-package.result == 'skipped' || needs.build-deb-package.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"
