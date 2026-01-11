@@ -35,13 +35,26 @@ For the lazy:
 curl -fsSL https://raw.githubusercontent.com/kavehtehrani/cloudflare-speed-cli/main/install.sh | sh
 ```
 
-### Arch Linux
+### Linux Distribution Packages
+
+As other people have kindly contributed, I've merged their pull requests for the distro they have
+contributed toward. My main OS is Ubuntu and Fedora, and the main distribution mechanism for this package is via
+['cargo-dist'](https://github.com/axodotdev/cargo-dist) which I have found helpful in generating the compatible binaries 
+via github actions. If you would like to contribute for other distros, please open an issue or send in a pull request.
+
+#### Arch Linux
 
 The package can be installed from the [official repositories](https://archlinux.org/packages/extra/x86_64/cloudflare-speed-cli/):
 
 ```bash
 pacman -S cloudflare-speed-cli
 ```
+
+#### NixOS
+
+```bash
+ nix run github:kavehtehrani/cloudflare-speed-cli
+ ```
 
 ### Binaries
 

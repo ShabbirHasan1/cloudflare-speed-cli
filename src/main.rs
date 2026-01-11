@@ -19,7 +19,6 @@ async fn main() -> Result<()> {
 
     match cli::run(args).await {
         Ok(()) => {
-            // Explicitly exit with code 0 on success, especially for non-TUI modes
             if is_non_tui {
                 std::process::exit(0);
             }
