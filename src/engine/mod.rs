@@ -1,10 +1,17 @@
 mod cloudflare;
+pub mod dns;
+pub mod ip_comparison;
 mod latency;
 mod network_bind;
 mod throughput;
+pub mod tls;
+pub mod traceroute;
 mod turn_udp;
 
-use crate::model::{Phase, RunConfig, RunResult, TestEvent};
+use crate::model::{
+    DnsSummary, IpVersionComparison, Phase, RunConfig, RunResult, TestEvent, TlsSummary,
+    TracerouteSummary,
+};
 use anyhow::Result;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -52,14 +59,47 @@ impl TestEngine {
         let paused = Arc::new(AtomicBool::new(false));
         let cancel = Arc::new(AtomicBool::new(false));
 
-        // Try to get meta from /meta endpoint first, then fall back to response headers
-        let meta: Option<serde_json::Value> = match cloudflare::fetch_meta(&client).await {
+        // Try to get meta from multiple sources in order of preference:
+        // 1. /meta endpoint (may have full details)
+        // 2. /cdn-cgi/trace endpoint (reliable source for colo, ip, country)
+        // 3. Response headers (fallback)
+        let mut meta: Option<serde_json::Value> = match cloudflare::fetch_meta(&client).await {
             Ok(v) if !v.as_object().map(|m| m.is_empty()).unwrap_or(true) => Some(v),
-            _ => {
-                // Fall back to extracting from response headers
-                cloudflare::fetch_meta_from_response(&client).await.ok()
-            }
+            _ => None,
         };
+
+        // If meta is empty or missing colo, try /cdn-cgi/trace
+        let has_colo = meta
+            .as_ref()
+            .and_then(|m| m.get("colo"))
+            .and_then(|v| v.as_str())
+            .is_some();
+
+        if !has_colo {
+            if let Ok(trace_meta) = cloudflare::fetch_trace(&client).await {
+                if !trace_meta.as_object().map(|m| m.is_empty()).unwrap_or(true) {
+                    // Merge trace_meta into meta
+                    if let Some(ref mut existing) = meta {
+                        if let (Some(existing_map), Some(trace_map)) =
+                            (existing.as_object_mut(), trace_meta.as_object())
+                        {
+                            for (k, v) in trace_map {
+                                if !existing_map.contains_key(k) {
+                                    existing_map.insert(k.clone(), v.clone());
+                                }
+                            }
+                        }
+                    } else {
+                        meta = Some(trace_meta);
+                    }
+                }
+            }
+        }
+
+        // Final fallback to response headers
+        if meta.is_none() {
+            meta = cloudflare::fetch_meta_from_response(&client).await.ok();
+        }
 
         let locations = cloudflare::fetch_locations(&client).await.ok();
         let server = meta
@@ -72,6 +112,14 @@ impl TestEngine {
                     .as_ref()
                     .and_then(|loc| cloudflare::map_colo_to_server(loc, colo))
             });
+
+        // Send meta info early so TUI can display server/colo/ip immediately
+        if let Some(ref m) = meta {
+            event_tx
+                .send(TestEvent::MetaInfo { meta: m.clone() })
+                .await
+                .ok();
+        }
 
         // Control listener.
         let paused2 = paused.clone();
@@ -87,6 +135,161 @@ impl TestEngine {
                 }
             }
         });
+
+        // Run diagnostic tests before the main speed test
+        let mut dns_summary: Option<DnsSummary> = None;
+        let mut tls_summary: Option<TlsSummary> = None;
+        let mut ip_comparison_result: Option<IpVersionComparison> = None;
+        let mut traceroute_summary: Option<TracerouteSummary> = None;
+        let mut external_ipv4: Option<String> = None;
+        let mut external_ipv6: Option<String> = None;
+
+        // DNS Resolution measurement
+        if self.cfg.measure_dns {
+            if let Some(hostname) = dns::extract_hostname(&self.cfg.base_url) {
+                event_tx
+                    .send(TestEvent::Info {
+                        message: format!("Measuring DNS resolution for {}...", hostname),
+                    })
+                    .await
+                    .ok();
+
+                match dns::measure_dns_resolution(&hostname).await {
+                    Ok(summary) => {
+                        event_tx
+                            .send(TestEvent::DiagnosticDns {
+                                summary: summary.clone(),
+                            })
+                            .await
+                            .ok();
+                        dns_summary = Some(summary);
+                    }
+                    Err(e) => {
+                        event_tx
+                            .send(TestEvent::Info {
+                                message: format!("DNS measurement failed: {}", e),
+                            })
+                            .await
+                            .ok();
+                    }
+                }
+            }
+        }
+
+        // TLS Handshake measurement
+        if self.cfg.measure_tls {
+            if let Some((hostname, port)) = tls::extract_host_port(&self.cfg.base_url) {
+                event_tx
+                    .send(TestEvent::Info {
+                        message: format!("Measuring TLS handshake with {}:{}...", hostname, port),
+                    })
+                    .await
+                    .ok();
+
+                match tls::measure_tls_handshake(&hostname, port).await {
+                    Ok(summary) => {
+                        event_tx
+                            .send(TestEvent::DiagnosticTls {
+                                summary: summary.clone(),
+                            })
+                            .await
+                            .ok();
+                        tls_summary = Some(summary);
+                    }
+                    Err(e) => {
+                        event_tx
+                            .send(TestEvent::Info {
+                                message: format!("TLS measurement failed: {}", e),
+                            })
+                            .await
+                            .ok();
+                    }
+                }
+            }
+        }
+
+        // Fetch external IPs (runs in parallel, part of default diagnostics)
+        if self.cfg.measure_dns {
+            let (v4, v6) = dns::fetch_external_ips(&self.cfg.base_url).await;
+            external_ipv4 = v4.clone();
+            external_ipv6 = v6.clone();
+            event_tx
+                .send(TestEvent::ExternalIps { ipv4: v4, ipv6: v6 })
+                .await
+                .ok();
+        }
+
+        // IPv4 vs IPv6 comparison
+        if self.cfg.compare_ip_versions {
+            event_tx
+                .send(TestEvent::Info {
+                    message: "Comparing IPv4 vs IPv6 performance...".to_string(),
+                })
+                .await
+                .ok();
+
+            match ip_comparison::compare_ip_versions(&self.cfg.base_url, &self.cfg.user_agent).await
+            {
+                Ok(comparison) => {
+                    event_tx
+                        .send(TestEvent::DiagnosticIpComparison {
+                            comparison: comparison.clone(),
+                        })
+                        .await
+                        .ok();
+                    ip_comparison_result = Some(comparison);
+                }
+                Err(e) => {
+                    event_tx
+                        .send(TestEvent::Info {
+                            message: format!("IP comparison failed: {}", e),
+                        })
+                        .await
+                        .ok();
+                }
+            }
+        }
+
+        // Traceroute
+        if self.cfg.traceroute {
+            if let Some(hostname) = dns::extract_hostname(&self.cfg.base_url) {
+                event_tx
+                    .send(TestEvent::Info {
+                        message: format!(
+                            "Running traceroute to {} (max {} hops)...",
+                            hostname, self.cfg.traceroute_max_hops
+                        ),
+                    })
+                    .await
+                    .ok();
+
+                match traceroute::run_traceroute(
+                    &hostname,
+                    self.cfg.traceroute_max_hops,
+                    &event_tx,
+                )
+                .await
+                {
+                    Ok(summary) => {
+                        event_tx
+                            .send(TestEvent::TracerouteComplete {
+                                summary: summary.clone(),
+                            })
+                            .await
+                            .ok();
+                        traceroute_summary = Some(summary);
+                    }
+                    Err(e) => {
+                        event_tx
+                            .send(TestEvent::Info {
+                                message: format!("Traceroute failed: {}", e),
+                            })
+                            .await
+                            .ok();
+                    }
+                }
+            }
+        }
 
         event_tx
             .send(TestEvent::PhaseStarted {
@@ -199,7 +402,15 @@ impl TestEngine {
             network_name: None,
             is_wireless: None,
             interface_mac: None,
-            link_speed_mbps: None,
+            local_ipv4: None,
+            local_ipv6: None,
+            external_ipv4,
+            external_ipv6,
+            // Diagnostic results
+            dns: dns_summary,
+            tls: tls_summary,
+            ip_comparison: ip_comparison_result,
+            traceroute: traceroute_summary,
         })
     }
 }

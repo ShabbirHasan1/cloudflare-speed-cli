@@ -2,7 +2,9 @@ mod charts;
 
 use crate::cli::{build_config, Cli};
 use crate::engine::{EngineControl, TestEngine};
-use crate::model::{Phase, RunResult, TestEvent};
+use crate::model::{
+    DnsSummary, IpVersionComparison, Phase, RunResult, TestEvent, TlsSummary, TracerouteSummary,
+};
 use anyhow::{Context, Result};
 use crossterm::{
     event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers},
@@ -82,8 +84,16 @@ struct UiState {
     network_name: Option<String>,
     is_wireless: Option<bool>,
     interface_mac: Option<String>,
-    link_speed_mbps: Option<u64>,
+    local_ipv4: Option<String>,
+    local_ipv6: Option<String>,
+    external_ipv4: Option<String>,
+    external_ipv6: Option<String>,
     certificate_filename: Option<String>,
+    // Diagnostic results
+    dns_summary: Option<DnsSummary>,
+    tls_summary: Option<TlsSummary>,
+    ip_comparison: Option<IpVersionComparison>,
+    traceroute_summary: Option<TracerouteSummary>,
 }
 
 impl Default for UiState {
@@ -139,8 +149,16 @@ impl Default for UiState {
             network_name: None,
             is_wireless: None,
             interface_mac: None,
-            link_speed_mbps: None,
+            local_ipv4: None,
+            local_ipv6: None,
+            external_ipv4: None,
+            external_ipv6: None,
             certificate_filename: None,
+            // Diagnostic results
+            dns_summary: None,
+            tls_summary: None,
+            ip_comparison: None,
+            traceroute_summary: None,
         }
     }
 }
@@ -297,7 +315,8 @@ pub async fn run(args: Cli) -> Result<()> {
     state.network_name = network_info.network_name.clone();
     state.is_wireless = network_info.is_wireless;
     state.interface_mac = network_info.interface_mac.clone();
-    state.link_speed_mbps = network_info.link_speed_mbps;
+    state.local_ipv4 = network_info.local_ipv4.clone();
+    state.local_ipv6 = network_info.local_ipv6.clone();
     state.certificate_filename = args
         .certificate
         .as_ref()
@@ -415,6 +434,11 @@ pub async fn run(args: Cli) -> Result<()> {
                                 state.loaded_ul_latency_received = 0;
                                 state.phase = Phase::IdleLatency;
                                 state.paused = false;
+                                // Clear diagnostic results
+                                state.dns_summary = None;
+                                state.tls_summary = None;
+                                state.ip_comparison = None;
+                                state.traceroute_summary = None;
                                 run_ctx = Some(start_run(&args).await?);
                             }
                         }
@@ -732,15 +756,14 @@ fn apply_event(state: &mut UiState, ev: TestEvent) {
             // Extract city for server location (if available, use it directly)
             if let Some(city) = meta.get("city").and_then(|v| v.as_str()) {
                 // If we have city, use it for server location
-                // Could combine with country if available
                 if let Some(country) = meta.get("country").and_then(|v| v.as_str()) {
                     state.server = Some(format!("{}, {}", city, country));
                 } else {
                     state.server = Some(city.to_string());
                 }
-            } else if state.colo.is_some() && state.server.is_none() {
-                // If we have colo but no city, we'll wait for RunResult.server
-                // which comes from map_colo_to_server
+            } else if let Some(ref colo) = state.colo {
+                // Use colo code as server if no city available
+                state.server = Some(colo.clone());
             }
         }
         TestEvent::LatencySample {
@@ -838,6 +861,67 @@ fn apply_event(state: &mut UiState, ev: TestEvent) {
                 }
                 _ => {}
             }
+        }
+        // Diagnostic events - store results and display summary in info bar
+        TestEvent::DiagnosticDns { summary } => {
+            state.info = format!(
+                "DNS: {} resolved in {:.2}ms ({} IPs)",
+                summary.hostname,
+                summary.resolution_time_ms,
+                summary.resolved_ips.len()
+            );
+            state.dns_summary = Some(summary);
+        }
+        TestEvent::DiagnosticTls { summary } => {
+            state.info = format!(
+                "TLS: {:.2}ms, {}",
+                summary.handshake_time_ms,
+                summary.protocol_version.as_deref().unwrap_or("-")
+            );
+            state.tls_summary = Some(summary);
+        }
+        TestEvent::DiagnosticIpComparison { comparison } => {
+            let v4_info = comparison
+                .ipv4_result
+                .as_ref()
+                .map(|r| {
+                    if r.available {
+                        format!("v4:{:.0}Mbps", r.download_mbps)
+                    } else {
+                        "v4:N/A".to_string()
+                    }
+                })
+                .unwrap_or_else(|| "-".to_string());
+            let v6_info = comparison
+                .ipv6_result
+                .as_ref()
+                .map(|r| {
+                    if r.available {
+                        format!("v6:{:.0}Mbps", r.download_mbps)
+                    } else {
+                        "v6:N/A".to_string()
+                    }
+                })
+                .unwrap_or_else(|| "-".to_string());
+            state.info = format!("IP Comparison: {} / {}", v4_info, v6_info);
+            state.ip_comparison = Some(comparison);
+        }
+        TestEvent::TracerouteHop { hop_number, hop } => {
+            let addr = hop.ip_address.as_deref().unwrap_or("*");
+            let rtt = hop.rtt_ms.first().map(|r| format!("{:.1}ms", r)).unwrap_or_else(|| "*".to_string());
+            state.info = format!("Traceroute hop {}: {} {}", hop_number, addr, rtt);
+        }
+        TestEvent::TracerouteComplete { summary } => {
+            state.info = format!(
+                "Traceroute: {} hops to {}",
+                summary.hops.len(),
+                summary.destination
+            );
+            state.traceroute_summary = Some(summary);
+        }
+        TestEvent::ExternalIps { ipv4, ipv6 } => {
+            state.external_ipv4 = ipv4;
+            state.external_ipv6 = ipv6;
         }
     }
 }
@@ -1166,15 +1250,6 @@ fn draw_dashboard(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
             Span::styled("MAC address: ", Style::default().fg(Color::Gray)),
             Span::raw(state.interface_mac.as_deref().unwrap_or("-")),
         ]),
-        Line::from(vec![
-            Span::styled("Link speed: ", Style::default().fg(Color::Gray)),
-            Span::raw(
-                state
-                    .link_speed_mbps
-                    .map(|s| format!("{} Mbps", s))
-                    .unwrap_or_else(|| "-".to_string()),
-            ),
-        ]),
     ];
 
     // Only show Certificate line if a certificate is set
@@ -1200,9 +1275,81 @@ fn draw_dashboard(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
             }),
         ]),
         Line::from(vec![
-            Span::styled("Your IP address: ", Style::default().fg(Color::Gray)),
-            Span::raw(state.ip.as_deref().unwrap_or("-")),
+            Span::styled("External IPv4: ", Style::default().fg(Color::Gray)),
+            Span::raw(state.external_ipv4.as_deref().unwrap_or(state.ip.as_deref().unwrap_or("-"))),
         ]),
+        Line::from(vec![
+            Span::styled("External IPv6: ", Style::default().fg(Color::Gray)),
+            Span::raw(state.external_ipv6.as_deref().unwrap_or("-")),
+        ]),
+    ]);
+
+    // Add diagnostic results if available
+    let has_diagnostics = state.dns_summary.is_some()
+        || state.tls_summary.is_some()
+        || state.ip_comparison.is_some()
+        || state.traceroute_summary.is_some();
+
+    if has_diagnostics {
+        network_lines.push(Line::from("")); // Separator
+
+        if let Some(ref dns) = state.dns_summary {
+            network_lines.push(Line::from(vec![
+                Span::styled("DNS resolution: ", Style::default().fg(Color::Gray)),
+                Span::raw(format!("{:.2}ms", dns.resolution_time_ms)),
+            ]));
+        }
+
+        if let Some(ref tls) = state.tls_summary {
+            network_lines.push(Line::from(vec![
+                Span::styled("TLS handshake: ", Style::default().fg(Color::Gray)),
+                Span::raw(format!(
+                    "{:.2}ms {}",
+                    tls.handshake_time_ms,
+                    tls.protocol_version.as_deref().unwrap_or("-")
+                )),
+            ]));
+        }
+
+        if let Some(ref cmp) = state.ip_comparison {
+            let v4_str = cmp
+                .ipv4_result
+                .as_ref()
+                .map(|r| {
+                    if r.available {
+                        format!("{:.1}Mbps", r.download_mbps)
+                    } else {
+                        "N/A".to_string()
+                    }
+                })
+                .unwrap_or_else(|| "-".to_string());
+            let v6_str = cmp
+                .ipv6_result
+                .as_ref()
+                .map(|r| {
+                    if r.available {
+                        format!("{:.1}Mbps", r.download_mbps)
+                    } else {
+                        "N/A".to_string()
+                    }
+                })
+                .unwrap_or_else(|| "-".to_string());
+            network_lines.push(Line::from(vec![
+                Span::styled("IPv4 vs IPv6: ", Style::default().fg(Color::Gray)),
+                Span::raw(format!("v4:{} v6:{}", v4_str, v6_str)),
+            ]));
+        }
+
+        if let Some(ref tr) = state.traceroute_summary {
+            let status = if tr.completed { "complete" } else { "partial" };
+            network_lines.push(Line::from(vec![
+                Span::styled("Traceroute: ", Style::default().fg(Color::Gray)),
+                Span::raw(format!("{} hops ({})", tr.hops.len(), status)),
+            ]));
+        }
+    }
+
+    network_lines.extend(vec![
         Line::from(""),
         Line::from(vec![
             Span::styled("Source: ", Style::default().fg(Color::Gray)),
@@ -1518,12 +1665,33 @@ fn draw_dashboard_compact(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
             )),
         ]),
         Line::from(vec![
-            Span::styled("Info: ", Style::default().fg(Color::Gray)),
-            Span::raw(&state.info),
-        ]),
-        Line::from(vec![
             Span::styled("Server: ", Style::default().fg(Color::Gray)),
             Span::raw(state.server.as_deref().unwrap_or("-")),
+        ]),
+    ]);
+
+    // Add condensed diagnostic info if available
+    let mut diag_parts: Vec<String> = Vec::new();
+    if let Some(ref dns) = state.dns_summary {
+        diag_parts.push(format!("DNS:{:.0}ms", dns.resolution_time_ms));
+    }
+    if let Some(ref tls) = state.tls_summary {
+        diag_parts.push(format!("TLS:{:.0}ms", tls.handshake_time_ms));
+    }
+    if let Some(ref tr) = state.traceroute_summary {
+        diag_parts.push(format!("Hops:{}", tr.hops.len()));
+    }
+    if !diag_parts.is_empty() {
+        meta_lines.push(Line::from(vec![
+            Span::styled("Diag: ", Style::default().fg(Color::Gray)),
+            Span::raw(diag_parts.join(" | ")),
+        ]));
+    }
+
+    meta_lines.extend(vec![
+        Line::from(vec![
+            Span::styled("Info: ", Style::default().fg(Color::Gray)),
+            Span::raw(&state.info),
         ]),
         Line::from(""),
         Line::from("Keys: q quit | r rerun | p pause | s save json | tab switch | ? help"),
@@ -1634,7 +1802,8 @@ fn enrich_result_with_network_info(r: &RunResult, state: &UiState) -> RunResult 
         network_name: state.network_name.clone(),
         is_wireless: state.is_wireless,
         interface_mac: state.interface_mac.clone(),
-        link_speed_mbps: state.link_speed_mbps,
+        local_ipv4: state.local_ipv4.clone(),
+        local_ipv6: state.local_ipv6.clone(),
     };
 
     // Use shared enrichment function

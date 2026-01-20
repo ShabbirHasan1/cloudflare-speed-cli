@@ -49,12 +49,13 @@ pub struct NetworkInfo {
     pub network_name: Option<String>,
     pub is_wireless: Option<bool>,
     pub interface_mac: Option<String>,
-    pub link_speed_mbps: Option<u64>,
+    pub local_ipv4: Option<String>,
+    pub local_ipv6: Option<String>,
 }
 
 /// Gather network interface information based on CLI arguments
 pub fn gather_network_info(args: &Cli) -> NetworkInfo {
-    let (interface_name, network_name, is_wireless, interface_mac, link_speed_mbps) =
+    let (interface_name, network_name, is_wireless, interface_mac) =
         if let Some(ref iface) = args.interface {
             // Use the specified interface
             let is_wireless = check_if_wireless(iface);
@@ -64,19 +65,21 @@ pub fn gather_network_info(args: &Cli) -> NetworkInfo {
                 None
             };
             let mac = get_interface_mac(iface);
-            let speed = get_interface_speed(iface);
-            (Some(iface.clone()), network_name, is_wireless, mac, speed)
+            (Some(iface.clone()), network_name, is_wireless, mac)
         } else {
             // Auto-detect default interface
             gather_default_network_info()
         };
+
+    let (local_ipv4, local_ipv6) = get_interface_ips(interface_name.as_deref());
 
     NetworkInfo {
         interface_name,
         network_name,
         is_wireless,
         interface_mac,
-        link_speed_mbps,
+        local_ipv4,
+        local_ipv6,
     }
 }
 
@@ -86,7 +89,6 @@ fn gather_default_network_info() -> (
     Option<String>,
     Option<bool>,
     Option<String>,
-    Option<u64>,
 ) {
     // Get default interface by trying to connect to a remote address
     let interface_name = get_default_interface();
@@ -99,10 +101,9 @@ fn gather_default_network_info() -> (
             None
         };
         let mac = get_interface_mac(iface);
-        let speed = get_interface_speed(iface);
-        (Some(iface.clone()), network_name, is_wireless, mac, speed)
+        (Some(iface.clone()), network_name, is_wireless, mac)
     } else {
-        (None, None, None, None, None)
+        (None, None, None, None)
     }
 }
 
@@ -293,37 +294,53 @@ fn get_interface_mac(iface: &str) -> Option<String> {
     None
 }
 
-/// Get link speed in Mbps
-#[cfg(not(windows))]
-fn get_interface_speed(iface: &str) -> Option<u64> {
-    let speed_path = format!("/sys/class/net/{}/speed", iface);
-    std::fs::read_to_string(speed_path)
-        .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .filter(|&speed| speed > 0 && speed < 1_000_000) // Sanity check
-}
+/// Get IPv4 and IPv6 addresses for an interface
+fn get_interface_ips(interface_name: Option<&str>) -> (Option<String>, Option<String>) {
+    let Ok(interfaces) = if_addrs::get_if_addrs() else {
+        return (None, None);
+    };
 
-#[cfg(windows)]
-fn get_interface_speed(iface: &str) -> Option<u64> {
-    let output = Command::new("powershell")
-        .args(&[
-            "-NoProfile",
-            "-Command",
-            &format!(
-                "([int](([double](Get-NetAdapter -Name '{}').Speed) / 1000000))",
-                iface
-            ),
-        ])
-        .output()
-        .ok()?;
+    let mut ipv4: Option<String> = None;
+    let mut ipv6: Option<String> = None;
 
-    if output.status.success() {
-        let speed_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if let Ok(speed) = speed_str.parse::<u64>() {
-            return Some(speed);
+    for iface in interfaces {
+        // If interface name is specified, only look at that interface
+        if let Some(target) = interface_name {
+            if iface.name != target {
+                continue;
+            }
+        }
+
+        // Skip loopback
+        if iface.is_loopback() {
+            continue;
+        }
+
+        match iface.addr {
+            if_addrs::IfAddr::V4(ref addr) => {
+                if ipv4.is_none() {
+                    ipv4 = Some(addr.ip.to_string());
+                }
+            }
+            if_addrs::IfAddr::V6(ref addr) => {
+                // Skip link-local addresses (fe80::)
+                let ip = addr.ip;
+                if !ip.is_loopback() && !is_link_local_v6(&ip) {
+                    if ipv6.is_none() {
+                        ipv6 = Some(ip.to_string());
+                    }
+                }
+            }
         }
     }
-    None
+
+    (ipv4, ipv6)
+}
+
+/// Check if an IPv6 address is link-local (fe80::/10)
+fn is_link_local_v6(ip: &std::net::Ipv6Addr) -> bool {
+    let segments = ip.segments();
+    (segments[0] & 0xffc0) == 0xfe80
 }
 
 /// Enrich RunResult with network information and metadata
@@ -335,7 +352,8 @@ pub fn enrich_result(result: &RunResult, network_info: &NetworkInfo) -> RunResul
     enriched.network_name = network_info.network_name.clone();
     enriched.is_wireless = network_info.is_wireless;
     enriched.interface_mac = network_info.interface_mac.clone();
-    enriched.link_speed_mbps = network_info.link_speed_mbps;
+    enriched.local_ipv4 = network_info.local_ipv4.clone();
+    enriched.local_ipv6 = network_info.local_ipv6.clone();
 
     // Extract metadata from result.meta if available
     if let Some(meta) = result.meta.as_ref() {

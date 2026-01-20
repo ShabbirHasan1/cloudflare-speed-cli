@@ -58,9 +58,70 @@ pub fn export_csv(path: &Path, result: &RunResult) -> Result<()> {
         std::fs::create_dir_all(parent).context("create export directory")?;
     }
     let mut out = String::new();
-    out.push_str("timestamp_utc,base_url,meas_id,comments,server,download_mbps,upload_mbps,idle_mean_ms,idle_median_ms,idle_p25_ms,idle_p75_ms,idle_loss,dl_loaded_mean_ms,dl_loaded_median_ms,dl_loaded_p25_ms,dl_loaded_p75_ms,dl_loaded_loss,ul_loaded_mean_ms,ul_loaded_median_ms,ul_loaded_p25_ms,ul_loaded_p75_ms,ul_loaded_loss,ip,colo,asn,as_org,interface_name,network_name,is_wireless,interface_mac,link_speed_mbps\n");
+    // Header row with all fields including diagnostics
+    out.push_str("timestamp_utc,base_url,meas_id,comments,server,download_mbps,upload_mbps,idle_mean_ms,idle_median_ms,idle_p25_ms,idle_p75_ms,idle_loss,dl_loaded_mean_ms,dl_loaded_median_ms,dl_loaded_p25_ms,dl_loaded_p75_ms,dl_loaded_loss,ul_loaded_mean_ms,ul_loaded_median_ms,ul_loaded_p25_ms,ul_loaded_p75_ms,ul_loaded_loss,ip,colo,asn,as_org,interface_name,network_name,is_wireless,interface_mac,local_ipv4,local_ipv6,external_ipv4,external_ipv6,dns_resolution_ms,dns_ipv4_count,dns_ipv6_count,dns_servers,tls_handshake_ms,tls_protocol,tls_cipher,ipv4_download_mbps,ipv4_upload_mbps,ipv4_latency_ms,ipv6_download_mbps,ipv6_upload_mbps,ipv6_latency_ms,traceroute_hops\n");
+
+    // Extract diagnostic values
+    let dns_resolution_ms = result.dns.as_ref().map(|d| d.resolution_time_ms);
+    let dns_ipv4_count = result.dns.as_ref().map(|d| d.ipv4_count);
+    let dns_ipv6_count = result.dns.as_ref().map(|d| d.ipv6_count);
+    let dns_servers = result
+        .dns
+        .as_ref()
+        .map(|d| d.dns_servers.join("; "))
+        .unwrap_or_default();
+    let tls_handshake_ms = result.tls.as_ref().map(|t| t.handshake_time_ms);
+    let tls_protocol = result
+        .tls
+        .as_ref()
+        .and_then(|t| t.protocol_version.clone());
+    let tls_cipher = result.tls.as_ref().and_then(|t| t.cipher_suite.clone());
+
+    // IPv4 results
+    let ipv4_download = result
+        .ip_comparison
+        .as_ref()
+        .and_then(|c| c.ipv4_result.as_ref())
+        .filter(|r| r.available)
+        .map(|r| r.download_mbps);
+    let ipv4_upload = result
+        .ip_comparison
+        .as_ref()
+        .and_then(|c| c.ipv4_result.as_ref())
+        .filter(|r| r.available)
+        .map(|r| r.upload_mbps);
+    let ipv4_latency = result
+        .ip_comparison
+        .as_ref()
+        .and_then(|c| c.ipv4_result.as_ref())
+        .filter(|r| r.available)
+        .map(|r| r.latency_ms);
+
+    // IPv6 results
+    let ipv6_download = result
+        .ip_comparison
+        .as_ref()
+        .and_then(|c| c.ipv6_result.as_ref())
+        .filter(|r| r.available)
+        .map(|r| r.download_mbps);
+    let ipv6_upload = result
+        .ip_comparison
+        .as_ref()
+        .and_then(|c| c.ipv6_result.as_ref())
+        .filter(|r| r.available)
+        .map(|r| r.upload_mbps);
+    let ipv6_latency = result
+        .ip_comparison
+        .as_ref()
+        .and_then(|c| c.ipv6_result.as_ref())
+        .filter(|r| r.available)
+        .map(|r| r.latency_ms);
+
+    // Traceroute hop count
+    let traceroute_hops = result.traceroute.as_ref().map(|t| t.hops.len());
+
     out.push_str(&format!(
-        "{},{},{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.6},{:.3},{:.3},{:.3},{:.3},{:.6},{:.3},{:.3},{:.3},{:.3},{:.6},{},{},{},{},{},{},{},{},{}\n",
+        "{},{},{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.6},{:.3},{:.3},{:.3},{:.3},{:.6},{:.3},{:.3},{:.3},{:.3},{:.6},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
         csv_escape(&result.timestamp_utc),
         csv_escape(&result.base_url),
         csv_escape(&result.meas_id),
@@ -91,7 +152,25 @@ pub fn export_csv(path: &Path, result: &RunResult) -> Result<()> {
         csv_escape(result.network_name.as_deref().unwrap_or("")),
         result.is_wireless.map(|w| if w { "true" } else { "false" }).unwrap_or(""),
         csv_escape(result.interface_mac.as_deref().unwrap_or("")),
-        result.link_speed_mbps.map(|s| s.to_string()).unwrap_or_else(|| "".to_string()),
+        csv_escape(result.local_ipv4.as_deref().unwrap_or("")),
+        csv_escape(result.local_ipv6.as_deref().unwrap_or("")),
+        csv_escape(result.external_ipv4.as_deref().unwrap_or("")),
+        csv_escape(result.external_ipv6.as_deref().unwrap_or("")),
+        // Diagnostic fields
+        dns_resolution_ms.map(|v| format!("{:.3}", v)).unwrap_or_default(),
+        dns_ipv4_count.map(|v| v.to_string()).unwrap_or_default(),
+        dns_ipv6_count.map(|v| v.to_string()).unwrap_or_default(),
+        csv_escape(&dns_servers),
+        tls_handshake_ms.map(|v| format!("{:.3}", v)).unwrap_or_default(),
+        csv_escape(tls_protocol.as_deref().unwrap_or("")),
+        csv_escape(tls_cipher.as_deref().unwrap_or("")),
+        ipv4_download.map(|v| format!("{:.3}", v)).unwrap_or_default(),
+        ipv4_upload.map(|v| format!("{:.3}", v)).unwrap_or_default(),
+        ipv4_latency.map(|v| format!("{:.3}", v)).unwrap_or_default(),
+        ipv6_download.map(|v| format!("{:.3}", v)).unwrap_or_default(),
+        ipv6_upload.map(|v| format!("{:.3}", v)).unwrap_or_default(),
+        ipv6_latency.map(|v| format!("{:.3}", v)).unwrap_or_default(),
+        traceroute_hops.map(|v| v.to_string()).unwrap_or_default(),
     ));
     std::fs::write(path, out).context("write export csv")?;
     Ok(())

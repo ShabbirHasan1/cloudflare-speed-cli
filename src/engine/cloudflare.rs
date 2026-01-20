@@ -324,6 +324,50 @@ pub async fn fetch_meta(client: &CloudflareClient) -> Result<serde_json::Value> 
     Ok(v)
 }
 
+/// Parse the /cdn-cgi/trace endpoint which returns key=value pairs
+pub async fn fetch_trace(client: &CloudflareClient) -> Result<serde_json::Value> {
+    let url = client
+        .base_url
+        .join("/cdn-cgi/trace")
+        .context("join /cdn-cgi/trace")?;
+    let text = client.http.get(url).send().await?.text().await?;
+
+    let mut meta = serde_json::Map::new();
+    for line in text.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            match key {
+                "ip" => {
+                    meta.insert(
+                        "clientIp".to_string(),
+                        serde_json::Value::String(value.to_string()),
+                    );
+                }
+                "colo" => {
+                    meta.insert(
+                        "colo".to_string(),
+                        serde_json::Value::String(value.to_string()),
+                    );
+                }
+                "loc" => {
+                    meta.insert(
+                        "country".to_string(),
+                        serde_json::Value::String(value.to_string()),
+                    );
+                }
+                "tls" => {
+                    meta.insert(
+                        "tlsVersion".to_string(),
+                        serde_json::Value::String(value.to_string()),
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(serde_json::Value::Object(meta))
+}
+
 pub async fn fetch_locations(client: &CloudflareClient) -> Result<serde_json::Value> {
     let url = client
         .base_url
@@ -334,9 +378,7 @@ pub async fn fetch_locations(client: &CloudflareClient) -> Result<serde_json::Va
 }
 
 pub fn map_colo_to_server(locations: &serde_json::Value, colo: &str) -> Option<String> {
-    // The /locations schema may change; we keep this defensive:
-    // search for any object containing a colo-like key matching `colo`
-    // and construct a friendly display string from available fields.
+    // Try to get location info from dynamic locations data
     fn visit(v: &serde_json::Value, colo: &str) -> Option<serde_json::Value> {
         match v {
             serde_json::Value::Array(a) => {
@@ -370,34 +412,31 @@ pub fn map_colo_to_server(locations: &serde_json::Value, colo: &str) -> Option<S
         }
     }
 
-    let obj = visit(locations, colo)?;
-    let m = obj.as_object()?;
-    let city = m
-        .get("city")
-        .and_then(|v| v.as_str())
-        .or_else(|| m.get("name").and_then(|v| v.as_str()));
-    let region = m.get("region").and_then(|v| v.as_str());
-    let country = m
-        .get("country")
-        .and_then(|v| v.as_str())
-        .or_else(|| m.get("countryName").and_then(|v| v.as_str()));
+    if let Some(obj) = visit(locations, colo) {
+        if let Some(m) = obj.as_object() {
+            let city = m
+                .get("city")
+                .and_then(|v| v.as_str())
+                .or_else(|| m.get("name").and_then(|v| v.as_str()));
+            let country = m
+                .get("country")
+                .and_then(|v| v.as_str())
+                .or_else(|| m.get("countryName").and_then(|v| v.as_str()));
 
-    let mut parts: Vec<String> = Vec::new();
-    parts.push(colo.to_string());
-    if let Some(c) = city {
-        parts.push(c.to_string());
-    }
-    if let Some(r) = region {
-        if city.is_none() {
-            parts.push(r.to_string());
+            let mut parts: Vec<String> = Vec::new();
+            parts.push(colo.to_string());
+            if let Some(c) = city {
+                parts.push(c.to_string());
+            }
+            if let Some(c) = country {
+                parts.push(c.to_string());
+            }
+            if parts.len() >= 2 {
+                return Some(parts.join(" - "));
+            }
         }
     }
-    if let Some(c) = country {
-        parts.push(c.to_string());
-    }
-    if parts.len() >= 2 {
-        Some(parts.join(" - "))
-    } else {
-        Some(colo.to_string())
-    }
+
+    // Just return the colo code if no location data available
+    Some(colo.to_string())
 }

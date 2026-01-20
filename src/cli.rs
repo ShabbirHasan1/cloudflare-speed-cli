@@ -96,6 +96,30 @@ pub struct Cli {
     /// Attach custom comments to this run
     #[arg(long)]
     pub comments: Option<String>,
+
+    /// Compare IPv4 vs IPv6 performance
+    #[arg(long)]
+    pub compare_ip_versions: bool,
+
+    /// Run traceroute to Cloudflare edge
+    #[arg(long)]
+    pub traceroute: bool,
+
+    /// Maximum number of hops for traceroute
+    #[arg(long, default_value_t = 30)]
+    pub traceroute_max_hops: u8,
+
+    /// Force IPv4 only (no IPv6)
+    #[arg(long)]
+    pub ipv4_only: bool,
+
+    /// Force IPv6 only (no IPv4)
+    #[arg(long)]
+    pub ipv6_only: bool,
+
+    /// Skip default diagnostic measurements (DNS, TLS)
+    #[arg(long)]
+    pub skip_diagnostics: bool,
 }
 
 pub async fn run(args: Cli) -> Result<()> {
@@ -139,6 +163,8 @@ fn gen_meas_id() -> String {
 
 /// Build a `RunConfig` from CLI arguments.
 pub fn build_config(args: &Cli) -> RunConfig {
+    // DNS and TLS run by default unless --skip-diagnostics is set
+    let skip = args.skip_diagnostics;
     RunConfig {
         base_url: args.base_url.clone(),
         meas_id: gen_meas_id(),
@@ -156,6 +182,14 @@ pub fn build_config(args: &Cli) -> RunConfig {
         interface: args.interface.clone(),
         source_ip: args.source.clone(),
         certificate_path: args.certificate.clone(),
+        // Diagnostic options: DNS and TLS run by default unless --skip-diagnostics
+        measure_dns: !skip,
+        measure_tls: !skip,
+        compare_ip_versions: args.compare_ip_versions,
+        traceroute: args.traceroute,
+        traceroute_max_hops: args.traceroute_max_hops,
+        ipv4_only: args.ipv4_only,
+        ipv6_only: args.ipv6_only,
     }
 }
 
@@ -295,6 +329,63 @@ async fn run_text(args: Cli) -> Result<()> {
             TestEvent::Info { message } => eprintln!("{message}"),
             TestEvent::MetaInfo { .. } => {
                 // Meta info is handled in TUI, ignore in text mode
+            }
+            // Diagnostic events
+            TestEvent::DiagnosticDns { summary } => {
+                eprintln!("DNS: {:.2}ms", summary.resolution_time_ms);
+            }
+            TestEvent::DiagnosticTls { summary } => {
+                eprintln!(
+                    "TLS: handshake {:.2}ms, {} {}",
+                    summary.handshake_time_ms,
+                    summary.protocol_version.as_deref().unwrap_or("-"),
+                    summary.cipher_suite.as_deref().unwrap_or("-")
+                );
+            }
+            TestEvent::DiagnosticIpComparison { comparison } => {
+                if let Some(ref v4) = comparison.ipv4_result {
+                    if v4.available {
+                        eprintln!(
+                            "IPv4: {} - DL {:.2} Mbps, UL {:.2} Mbps, latency {:.1}ms",
+                            v4.ip_address, v4.download_mbps, v4.upload_mbps, v4.latency_ms
+                        );
+                    } else {
+                        eprintln!("IPv4: unavailable - {:?}", v4.error);
+                    }
+                }
+                if let Some(ref v6) = comparison.ipv6_result {
+                    if v6.available {
+                        eprintln!(
+                            "IPv6: {} - DL {:.2} Mbps, UL {:.2} Mbps, latency {:.1}ms",
+                            v6.ip_address, v6.download_mbps, v6.upload_mbps, v6.latency_ms
+                        );
+                    } else {
+                        eprintln!("IPv6: unavailable - {:?}", v6.error);
+                    }
+                }
+            }
+            TestEvent::TracerouteHop { hop_number, hop } => {
+                let addr = hop.ip_address.as_deref().unwrap_or("*");
+                let rtts: Vec<String> = hop.rtt_ms.iter().map(|r| format!("{:.1}ms", r)).collect();
+                let rtt_str = if rtts.is_empty() {
+                    "*".to_string()
+                } else {
+                    rtts.join(" ")
+                };
+                eprintln!("{:>2}  {} {}", hop_number, addr, rtt_str);
+            }
+            TestEvent::TracerouteComplete { summary } => {
+                eprintln!(
+                    "Traceroute to {} {} ({} hops)",
+                    summary.destination,
+                    if summary.completed { "completed" } else { "incomplete" },
+                    summary.hops.len()
+                );
+            }
+            TestEvent::ExternalIps { ipv4, ipv6 } => {
+                let v4 = ipv4.as_deref().unwrap_or("-");
+                let v6 = ipv6.as_deref().unwrap_or("-");
+                eprintln!("External IPs: v4={} v6={}", v4, v6);
             }
         }
     }
