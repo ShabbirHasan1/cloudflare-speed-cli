@@ -75,6 +75,12 @@ struct UiState {
     // History filtering
     history_filter: String,         // Current filter text
     history_filter_editing: bool,   // Whether user is typing in filter input
+    // Charts tab state
+    charts_network_filter: Option<String>, // None = all networks, Some(name) = specific network
+    charts_available_networks: Vec<String>, // List of unique network names from history
+    // History detail view state
+    history_detail_view: bool,    // Whether showing JSON detail view
+    history_detail_scroll: usize, // Scroll position in detail view
     ip: Option<String>,
     colo: Option<String>,
     server: Option<String>,
@@ -143,6 +149,10 @@ impl Default for UiState {
             initial_history_load_size: 66, // Default initial load size
             history_filter: String::new(),
             history_filter_editing: false,
+            charts_network_filter: None,
+            charts_available_networks: Vec::new(),
+            history_detail_view: false,
+            history_detail_scroll: 0,
             ip: None,
             colo: None,
             server: None,
@@ -164,6 +174,25 @@ impl Default for UiState {
             tls_summary: None,
             ip_comparison: None,
             traceroute_summary: None,
+        }
+    }
+}
+
+/// Update the list of available networks from history for the Charts tab
+fn update_available_networks(state: &mut UiState) {
+    let mut networks: Vec<String> = state
+        .history
+        .iter()
+        .filter_map(|r| r.network_name.clone())
+        .collect();
+    networks.sort();
+    networks.dedup();
+    state.charts_available_networks = networks;
+
+    // Reset filter if current selection is no longer valid
+    if let Some(ref current) = state.charts_network_filter {
+        if !state.charts_available_networks.contains(current) {
+            state.charts_network_filter = None;
         }
     }
 }
@@ -313,6 +342,7 @@ pub async fn run(args: Cli) -> Result<()> {
     state.initial_history_load_size = initial_load;
     state.history = crate::storage::load_recent(initial_load).unwrap_or_default();
     state.history_loaded_count = state.history.len();
+    update_available_networks(&mut state);
 
     // Gather network interface information using shared module
     let network_info = crate::network::gather_network_info(&args);
@@ -378,6 +408,35 @@ pub async fn run(args: Cli) -> Result<()> {
                         continue;
                     }
 
+                    // Handle detail view mode (when on history tab and viewing JSON detail)
+                    if state.tab == 1 && state.history_detail_view {
+                        match k.code {
+                            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                                // Exit detail view
+                                state.history_detail_view = false;
+                                state.history_detail_scroll = 0;
+                            }
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                // Scroll up
+                                state.history_detail_scroll =
+                                    state.history_detail_scroll.saturating_sub(1);
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                // Scroll down
+                                state.history_detail_scroll += 1;
+                            }
+                            KeyCode::PageUp => {
+                                state.history_detail_scroll =
+                                    state.history_detail_scroll.saturating_sub(20);
+                            }
+                            KeyCode::PageDown => {
+                                state.history_detail_scroll += 20;
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
                     match (k.modifiers, k.code) {
                         (_, KeyCode::Char('q')) | (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
                             if let Some(ref ctx) = run_ctx {
@@ -400,6 +459,7 @@ pub async fn run(args: Cli) -> Result<()> {
                                         let old_count = state.history.len();
                                         state.history = new_history;
                                         state.history_loaded_count = state.history.len();
+                                        update_available_networks(&mut state);
 
                                         // Adjust selection if needed
                                         if state.history_selected >= state.history.len() && !state.history.is_empty() {
@@ -551,8 +611,17 @@ pub async fn run(args: Cli) -> Result<()> {
                                 "Auto-save disabled".into()
                             };
                         }
+                        (KeyModifiers::SHIFT, KeyCode::BackTab) => {
+                            // Shift+Tab cycles backwards
+                            let new_tab = if state.tab == 0 { 3 } else { state.tab - 1 };
+                            state.tab = new_tab;
+                            if new_tab == 1 {
+                                state.history_selected = 0;
+                                state.history_scroll_offset = 0;
+                            }
+                        }
                         (_, KeyCode::Tab) => {
-                            let new_tab = (state.tab + 1) % 3;
+                            let new_tab = (state.tab + 1) % 4;
                             state.tab = new_tab;
                             // Reset history selection when switching to history tab
                             if new_tab == 1 {
@@ -561,7 +630,7 @@ pub async fn run(args: Cli) -> Result<()> {
                             }
                         }
                         (_, KeyCode::Char('?')) => {
-                            state.tab = 2; // help
+                            state.tab = 3; // help
                         }
                         // History navigation and deletion (only when on History tab)
                         (_, KeyCode::Up) | (_, KeyCode::Char('k')) => {
@@ -608,6 +677,7 @@ pub async fn run(args: Cli) -> Result<()> {
                                             if !new_items.is_empty() {
                                                 state.history.extend(new_items);
                                                 state.history_loaded_count = state.history.len();
+                                                update_available_networks(&mut state);
                                             }
                                         }
                                     }
@@ -639,6 +709,13 @@ pub async fn run(args: Cli) -> Result<()> {
                                 }
                             }
                         }
+                        // Enter key to view JSON detail (only on History tab)
+                        (_, KeyCode::Enter) => {
+                            if state.tab == 1 && !state.history.is_empty() {
+                                state.history_detail_view = true;
+                                state.history_detail_scroll = 0;
+                            }
+                        }
                         // Filter controls (only on History tab)
                         (_, KeyCode::Char('/')) => {
                             if state.tab == 1 {
@@ -651,6 +728,69 @@ pub async fn run(args: Cli) -> Result<()> {
                                 state.history_filter.clear();
                                 state.history_selected = 0;
                                 state.history_scroll_offset = 0;
+                            }
+                        }
+                        // Charts tab: cycle through networks with left/right or h/l
+                        (_, KeyCode::Left) | (_, KeyCode::Char('h')) => {
+                            if state.tab == 2 && !state.charts_available_networks.is_empty() {
+                                // Cycle backwards: All -> last network -> ... -> first network -> All
+                                match &state.charts_network_filter {
+                                    None => {
+                                        // Currently "All", go to last network
+                                        state.charts_network_filter = Some(
+                                            state.charts_available_networks.last().unwrap().clone(),
+                                        );
+                                    }
+                                    Some(current) => {
+                                        // Find current index and go to previous
+                                        if let Some(idx) = state
+                                            .charts_available_networks
+                                            .iter()
+                                            .position(|n| n == current)
+                                        {
+                                            if idx == 0 {
+                                                state.charts_network_filter = None; // Go to "All"
+                                            } else {
+                                                state.charts_network_filter = Some(
+                                                    state.charts_available_networks[idx - 1].clone(),
+                                                );
+                                            }
+                                        } else {
+                                            state.charts_network_filter = None;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        (_, KeyCode::Right) | (_, KeyCode::Char('l')) => {
+                            if state.tab == 2 && !state.charts_available_networks.is_empty() {
+                                // Cycle forwards: All -> first network -> ... -> last network -> All
+                                match &state.charts_network_filter {
+                                    None => {
+                                        // Currently "All", go to first network
+                                        state.charts_network_filter = Some(
+                                            state.charts_available_networks.first().unwrap().clone(),
+                                        );
+                                    }
+                                    Some(current) => {
+                                        // Find current index and go to next
+                                        if let Some(idx) = state
+                                            .charts_available_networks
+                                            .iter()
+                                            .position(|n| n == current)
+                                        {
+                                            if idx >= state.charts_available_networks.len() - 1 {
+                                                state.charts_network_filter = None; // Go to "All"
+                                            } else {
+                                                state.charts_network_filter = Some(
+                                                    state.charts_available_networks[idx + 1].clone(),
+                                                );
+                                            }
+                                        } else {
+                                            state.charts_network_filter = None;
+                                        }
+                                    }
+                                }
                             }
                         }
                         _ => {}
@@ -713,6 +853,7 @@ pub async fn run(args: Cli) -> Result<()> {
                                     let reload_size = (state.history_loaded_count + 1).max(state.initial_history_load_size);
                                     state.history = crate::storage::load_recent(reload_size).unwrap_or_default();
                                     state.history_loaded_count = state.history.len();
+                                    update_available_networks(&mut state);
                                     // Reset selection to show the new test (most recent) if on history tab
                                     if state.tab == 1 {
                                         state.history_selected = 0;
@@ -986,6 +1127,7 @@ fn draw(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
     let tabs = Tabs::new(vec![
         Line::from("Dashboard"),
         Line::from("History"),
+        Line::from("Charts"),
         Line::from("Help"),
     ])
     .select(state.tab)
@@ -999,7 +1141,14 @@ fn draw(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
 
     match state.tab {
         0 => draw_dashboard(chunks[1], f, state),
-        1 => draw_history(chunks[1], f, state),
+        1 => {
+            if state.history_detail_view {
+                draw_history_detail(chunks[1], f, state)
+            } else {
+                draw_history(chunks[1], f, state)
+            }
+        }
+        2 => draw_charts(chunks[1], f, state),
         _ => draw_help(chunks[1], f),
     }
 }
@@ -2045,6 +2194,8 @@ fn draw_history(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
     }
     header_spans.extend(vec![
         Span::raw(") - "),
+        Span::styled("Enter", Style::default().fg(Color::Magenta)),
+        Span::raw(": view, "),
         Span::styled("/", Style::default().fg(Color::Magenta)),
         Span::raw(": filter, "),
         Span::styled("↑↓", Style::default().fg(Color::Magenta)),
@@ -2458,6 +2609,400 @@ fn draw_history(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
 
     let p = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("History"));
     f.render_widget(p, area);
+}
+
+fn draw_history_detail(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Get the filtered history to find the correct selected item
+    let filter_lower = state.history_filter.to_lowercase();
+    let filtered_history: Vec<&RunResult> = if state.history_filter.is_empty() {
+        state.history.iter().collect()
+    } else {
+        state
+            .history
+            .iter()
+            .filter(|r| {
+                let matches_field = |opt: &Option<String>| {
+                    opt.as_ref()
+                        .map(|s| s.to_lowercase().contains(&filter_lower))
+                        .unwrap_or(false)
+                };
+                matches_field(&r.network_name)
+                    || matches_field(&r.interface_name)
+                    || matches_field(&r.as_org)
+                    || matches_field(&r.colo)
+                    || matches_field(&r.comments)
+            })
+            .collect()
+    };
+
+    let effective_selected = state
+        .history_selected
+        .min(filtered_history.len().saturating_sub(1));
+
+    if let Some(result) = filtered_history.get(effective_selected) {
+        // Header with navigation help
+        lines.push(Line::from(vec![
+            Span::styled("JSON Detail View", Style::default().fg(Color::Cyan)),
+            Span::raw(" - "),
+            Span::styled("Esc/Enter/q", Style::default().fg(Color::Magenta)),
+            Span::raw(": back, "),
+            Span::styled("↑↓/jk", Style::default().fg(Color::Magenta)),
+            Span::raw(": scroll, "),
+            Span::styled("PgUp/PgDn", Style::default().fg(Color::Magenta)),
+            Span::raw(": fast scroll"),
+        ]));
+        lines.push(Line::from(""));
+
+        // Serialize the result to pretty JSON
+        let json_str = match serde_json::to_string_pretty(result) {
+            Ok(s) => s,
+            Err(e) => format!("Error serializing JSON: {}", e),
+        };
+
+        // Split JSON into lines for display
+        let json_lines: Vec<&str> = json_str.lines().collect();
+        let total_lines = json_lines.len();
+
+        // Calculate available height for JSON content (subtract header lines and borders)
+        let available_height = (area.height as usize).saturating_sub(5);
+
+        // Clamp scroll offset locally (don't mutate state in draw)
+        let max_scroll = total_lines.saturating_sub(available_height);
+        let scroll_offset = state.history_detail_scroll.min(max_scroll);
+
+        // Show scroll position
+        let scroll_info = if total_lines > available_height {
+            format!(
+                " (lines {}-{} of {})",
+                scroll_offset + 1,
+                (scroll_offset + available_height).min(total_lines),
+                total_lines
+            )
+        } else {
+            String::new()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                result.network_name.as_deref().unwrap_or("Unknown Network"),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::raw(" - "),
+            Span::styled(&result.timestamp_utc, Style::default().fg(Color::Gray)),
+            Span::styled(scroll_info, Style::default().fg(Color::Gray)),
+        ]));
+        lines.push(Line::from(""));
+
+        // Add JSON lines with syntax highlighting
+        for line in json_lines.iter().skip(scroll_offset).take(available_height)
+        {
+            // Simple syntax highlighting
+            let styled_line = if line.trim().starts_with('"') && line.contains(':') {
+                // Key-value line
+                if let Some(colon_pos) = line.find(':') {
+                    let (key_part, value_part) = line.split_at(colon_pos + 1);
+                    Line::from(vec![
+                        Span::styled(key_part.to_string(), Style::default().fg(Color::Cyan)),
+                        Span::styled(value_part.to_string(), Style::default().fg(Color::White)),
+                    ])
+                } else {
+                    Line::from(Span::raw(line.to_string()))
+                }
+            } else if line.trim().starts_with('}')
+                || line.trim().starts_with(']')
+                || line.trim().starts_with('{')
+                || line.trim().starts_with('[')
+            {
+                // Brackets
+                Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(Color::Gray),
+                ))
+            } else {
+                Line::from(Span::raw(line.to_string()))
+            };
+            lines.push(styled_line);
+        }
+    } else {
+        lines.push(Line::from("No item selected."));
+    }
+
+    let p = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("History - JSON Detail"),
+    );
+    f.render_widget(p, area);
+}
+
+fn draw_charts(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
+    use ratatui::widgets::{BarChart, Bar, BarGroup};
+    use std::collections::HashMap;
+
+    // Assign consistent colors to networks using a HashMap for reliable lookup
+    let network_colors = [
+        Color::Green,
+        Color::Cyan,
+        Color::Magenta,
+        Color::Yellow,
+        Color::Blue,
+        Color::LightRed,
+        Color::LightGreen,
+        Color::LightCyan,
+        Color::LightMagenta,
+        Color::LightYellow,
+    ];
+
+    // Build color map from available networks
+    let network_color_map: HashMap<&str, Color> = state
+        .charts_available_networks
+        .iter()
+        .enumerate()
+        .map(|(idx, name)| (name.as_str(), network_colors[idx % network_colors.len()]))
+        .collect();
+
+    // Filter history by selected network
+    let filtered_data: Vec<&RunResult> = state
+        .history
+        .iter()
+        .filter(|r| {
+            if let Some(ref filter_network) = state.charts_network_filter {
+                r.network_name.as_ref() == Some(filter_network)
+            } else {
+                true // Show all
+            }
+        })
+        .collect();
+
+    // Layout: header (2 lines + border) + two charts
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(0)].as_ref())
+        .split(area);
+
+    // Header with network filter info
+    let filter_display = match &state.charts_network_filter {
+        None => "All Networks".to_string(),
+        Some(n) => n.clone(),
+    };
+    let network_count = state.charts_available_networks.len();
+
+    // Build a colored legend showing network -> color mapping
+    let mut legend_spans: Vec<Span> = vec![Span::raw("Networks: ")];
+    for (idx, network) in state.charts_available_networks.iter().enumerate() {
+        if idx > 0 {
+            legend_spans.push(Span::raw(", "));
+        }
+        let color = network_colors[idx % network_colors.len()];
+        legend_spans.push(Span::styled(network.as_str(), Style::default().fg(color)));
+    }
+
+    let header_text = vec![
+        Line::from(vec![
+            Span::raw("Filter: "),
+            Span::styled(&filter_display, Style::default().fg(Color::Yellow)),
+            Span::raw(format!(
+                " ({} of {}) - ",
+                if state.charts_network_filter.is_none() {
+                    0
+                } else {
+                    state
+                        .charts_available_networks
+                        .iter()
+                        .position(|n| Some(n) == state.charts_network_filter.as_ref())
+                        .map(|i| i + 1)
+                        .unwrap_or(0)
+                },
+                network_count
+            )),
+            Span::styled("←/→", Style::default().fg(Color::Magenta)),
+            Span::raw(" or "),
+            Span::styled("h/l", Style::default().fg(Color::Magenta)),
+            Span::raw(": cycle"),
+        ]),
+        Line::from(legend_spans),
+    ];
+    let header =
+        Paragraph::new(header_text).block(Block::default().borders(Borders::BOTTOM));
+    f.render_widget(header, chunks[0]);
+
+    // Charts area split vertically (DL on top, UL on bottom)
+    let chart_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
+        .split(chunks[1]);
+
+    // Calculate how many bars can fit based on available width
+    // Chart width = chunks[1].width - Y-axis label width (6) - borders (2)
+    let available_chart_width = chunks[1].width.saturating_sub(8) as usize;
+    // With bar_width=1 and bar_gap=0, max bars equals available width
+    let max_bars = available_chart_width.max(1).min(100);
+
+    // Prepare data for charts: take only as many as can fit, then reverse so oldest is on left, newest on right
+    let data_points: Vec<_> = filtered_data
+        .iter()
+        .take(max_bars) // Take only as many as can fit (history is newest-first)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev() // Reverse so oldest is on left, newest on right
+        .collect();
+
+    if data_points.is_empty() {
+        let empty = Paragraph::new("No data available for selected network.")
+            .block(Block::default().borders(Borders::ALL).title("Charts"));
+        f.render_widget(empty, chunks[1]);
+        return;
+    }
+
+    let num_bars = data_points.len();
+
+    // Calculate max values for scaling
+    let max_dl = data_points
+        .iter()
+        .map(|r| r.download.mbps)
+        .fold(0.0_f64, |a, b| a.max(b))
+        .max(10.0);
+    let max_ul = data_points
+        .iter()
+        .map(|r| r.upload.mbps)
+        .fold(0.0_f64, |a, b| a.max(b))
+        .max(10.0);
+
+    // Compute colors ONCE for all data points (same color for DL and UL of same test)
+    let bar_colors: Vec<Color> = data_points
+        .iter()
+        .map(|r| {
+            if state.charts_network_filter.is_none() {
+                // "All Networks" view - color by network
+                r.network_name
+                    .as_ref()
+                    .and_then(|n| network_color_map.get(n.as_str()).copied())
+                    .unwrap_or(Color::Gray) // Fallback for entries with no network name
+            } else {
+                // Single network view - use consistent green
+                Color::Green
+            }
+        })
+        .collect();
+
+    // Create download bars with per-bar colors
+    let dl_bars: Vec<Bar> = data_points
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            Bar::default()
+                .value(r.download.mbps as u64)
+                .style(Style::default().fg(bar_colors[i]))
+        })
+        .collect();
+
+    // Split download chart area into Y-axis labels and chart
+    let dl_layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(6), Constraint::Min(0)].as_ref())
+        .split(chart_chunks[0]);
+
+    // Recalculate bar width for the actual chart area
+    let dl_chart_width = dl_layout[1].width.saturating_sub(2) as usize;
+    let dl_bar_width = if num_bars > 0 {
+        (dl_chart_width / num_bars).max(1) as u16
+    } else {
+        1
+    };
+
+    // Y-axis labels for download - offset by 1 at top/bottom to align with chart's inner area
+    let dl_label_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),      // border offset (aligns with chart top border)
+            Constraint::Length(1),      // max
+            Constraint::Min(0),         // spacer (fills middle)
+            Constraint::Length(1),      // 0
+            Constraint::Length(1),      // border offset (aligns with chart bottom border)
+        ])
+        .split(dl_layout[0]);
+
+    f.render_widget(
+        Paragraph::new(format!("{:>5.0}", max_dl)).style(Style::default().fg(Color::Gray)),
+        dl_label_layout[1],
+    );
+    f.render_widget(
+        Paragraph::new(format!("{:>5}", "0")).style(Style::default().fg(Color::Gray)),
+        dl_label_layout[3],
+    );
+
+    let dl_chart = BarChart::default()
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("Download (max {:.0} Mbps)", max_dl)),
+        )
+        .data(BarGroup::default().bars(&dl_bars))
+        .bar_width(dl_bar_width)
+        .bar_gap(0)
+        .max(max_dl as u64);
+
+    f.render_widget(dl_chart, dl_layout[1]);
+
+    // Create upload bars with same colors as download
+    let ul_bars: Vec<Bar> = data_points
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            Bar::default()
+                .value(r.upload.mbps as u64)
+                .style(Style::default().fg(bar_colors[i]))
+        })
+        .collect();
+
+    // Split upload chart area into Y-axis labels and chart
+    let ul_layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(6), Constraint::Min(0)].as_ref())
+        .split(chart_chunks[1]);
+
+    // Recalculate bar width for upload chart area
+    let ul_chart_width = ul_layout[1].width.saturating_sub(2) as usize;
+    let ul_bar_width = if num_bars > 0 {
+        (ul_chart_width / num_bars).max(1) as u16
+    } else {
+        1
+    };
+
+    // Y-axis labels for upload - offset by 1 at top/bottom to align with chart's inner area
+    let ul_label_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),      // border offset (aligns with chart top border)
+            Constraint::Length(1),      // max
+            Constraint::Min(0),         // spacer (fills middle)
+            Constraint::Length(1),      // 0
+            Constraint::Length(1),      // border offset (aligns with chart bottom border)
+        ])
+        .split(ul_layout[0]);
+
+    f.render_widget(
+        Paragraph::new(format!("{:>5.0}", max_ul)).style(Style::default().fg(Color::Gray)),
+        ul_label_layout[1],
+    );
+    f.render_widget(
+        Paragraph::new(format!("{:>5}", "0")).style(Style::default().fg(Color::Gray)),
+        ul_label_layout[3],
+    );
+
+    let ul_chart = BarChart::default()
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("Upload (max {:.0} Mbps)", max_ul)),
+        )
+        .data(BarGroup::default().bars(&ul_bars))
+        .bar_width(ul_bar_width)
+        .bar_gap(0)
+        .max(max_ul as u64);
+
+    f.render_widget(ul_chart, ul_layout[1]);
 }
 
 fn max_y(points: &[(f64, f64)]) -> f64 {
