@@ -7,6 +7,8 @@ mod stats;
 mod storage;
 #[cfg(feature = "tui")]
 mod tui;
+#[cfg(feature = "tui")]
+mod update;
 
 use anyhow::Result;
 use clap::Parser;

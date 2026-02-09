@@ -85,6 +85,8 @@ pub struct UiState {
     pub tls_summary: Option<TlsSummary>,
     pub ip_comparison: Option<IpVersionComparison>,
     pub traceroute_summary: Option<TracerouteSummary>,
+    /// None = check not completed, Some(None) = on latest, Some(Some(v)) = update available
+    pub update_status: Option<Option<String>>,
 }
 
 impl Default for UiState {
@@ -157,6 +159,7 @@ impl Default for UiState {
             tls_summary: None,
             ip_comparison: None,
             traceroute_summary: None,
+            update_status: None,
         }
     }
 }

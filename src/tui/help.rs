@@ -82,7 +82,7 @@ pub fn draw_help(area: Rect, f: &mut Frame) {
             Span::raw("           Refresh history"),
         ]),
         Line::from(""),
-        Line::from("Repository:"),
+        Line::from("Repository (update your tool or report issues here):"),
         Line::from(vec![
             Span::raw("  "),
             Span::styled(

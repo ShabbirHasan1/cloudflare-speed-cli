@@ -22,7 +22,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::Color,
     style::Style,
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, Borders, Tabs},
     Terminal,
 };
@@ -80,6 +80,14 @@ pub async fn run(args: Cli) -> Result<()> {
         .map(|s| s.to_string());
     state.proxy_url = args.proxy.clone();
 
+    // Spawn background task to check for updates (non-blocking, silent on error)
+    let (update_tx, mut update_rx) = tokio::sync::mpsc::channel::<Option<String>>(1);
+    tokio::spawn(async move {
+        if let Some(status) = crate::update::check_for_update().await {
+            let _ = update_tx.send(status).await;
+        }
+    });
+
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
 
@@ -94,6 +102,9 @@ pub async fn run(args: Cli) -> Result<()> {
         tokio::select! {
             _ = tick.tick() => {
                 terminal.draw(|f| draw(f.area(), f, &state)).ok();
+            }
+            Some(status) = update_rx.recv() => {
+                state.update_status = Some(status);
             }
             maybe_ev = events.next() => {
                 let Some(Ok(ev)) = maybe_ev else { continue };
@@ -855,7 +866,14 @@ fn draw(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title(format!("cloudflare-speed-cli v{}", env!("CARGO_PKG_VERSION"))),
+            .title(match &state.update_status {
+                Some(Some(v)) => Line::from(vec![
+                    Span::raw(format!("cloudflare-speed-cli v{} ", env!("CARGO_PKG_VERSION"))),
+                    Span::styled(format!("(v{} available)", v), Style::default().fg(Color::Cyan)),
+                ]),
+                Some(None) => Line::from(format!("cloudflare-speed-cli v{} (latest)", env!("CARGO_PKG_VERSION"))),
+                None => Line::from(format!("cloudflare-speed-cli v{}", env!("CARGO_PKG_VERSION"))),
+            }),
     )
     .highlight_style(Style::default().fg(Color::Yellow));
     f.render_widget(tabs, chunks[0]);
