@@ -5,8 +5,8 @@
 
 A CLI tool that displays network speed test results from Cloudflare's speed test service in a TUI interface.
 
-⚠️ If you're seeing zero download speeds, a hotfix has been implemented in v0.6.2. If you are on a version before this, upgrade by following 
-the [installation instructions](#installation) below.  
+_⚠️ If you're seeing zero download speeds, a hotfix has been implemented in v0.6.2. If you are on a version before this, upgrade by following 
+the [installation instructions](#installation) below._  
 
 
 ![screenshot](./images/screenshot-dashboard.png)
