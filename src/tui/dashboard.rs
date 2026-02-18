@@ -364,22 +364,6 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
         let lost = udp_sent.saturating_sub(safe_received);
         let pending = safe_total.saturating_sub(udp_sent);
 
-        let bar_width = udp_inner.width.saturating_sub(70) as usize;
-        let bar_width = bar_width.max(10);
-
-        // Ensure any loss shows at least one red segment
-        let lost_units = if lost > 0 {
-            ((lost as f64 / safe_total as f64) * bar_width as f64).ceil().max(1.0) as usize
-        } else {
-            0
-        };
-        let recv_units = ((safe_received as f64 / safe_total as f64) * bar_width as f64).floor() as usize;
-        let pending_units = bar_width.saturating_sub(recv_units + lost_units);
-
-        let bar_recv = "█".repeat(recv_units);
-        let bar_lost = "█".repeat(lost_units);
-        let bar_pending = "░".repeat(pending_units);
-
         let rtt_str = udp_latest_rtt
             .map(|v| format!("{:.0}ms", v))
             .unwrap_or_else(|| "-".to_string());
@@ -398,6 +382,58 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
             })
             .unwrap_or(("", String::new(), String::new(), String::new()));
 
+        // Calculate text width before the bar
+        let mut pre_bar_width: usize = 0;
+        pre_bar_width += udp_status.len() + 1; // status + space
+        if !quality_label.is_empty() {
+            pre_bar_width += quality_label.len();
+            if !mos_str.is_empty() {
+                pre_bar_width += 2 + mos_str.len() + 2; // " (" + mos + ") "
+            } else {
+                pre_bar_width += 1; // space
+            }
+        }
+        let loss_str = format!("loss {:.1}%", udp_loss_pct);
+        let rtt_display = format!("rtt {}", rtt_str);
+        pre_bar_width += loss_str.len() + 1 + rtt_display.len(); // loss + space + rtt
+        if !jitter_str.is_empty() {
+            pre_bar_width += 1 + jitter_str.len();
+        }
+        if !reorder_str.is_empty() && state.phase != crate::model::Phase::PacketLoss {
+            pre_bar_width += 1 + reorder_str.len();
+        }
+        pre_bar_width += 2; // "  " before bar
+
+        // Calculate text width after the bar
+        let ok_str = format!("ok {}", safe_received);
+        let lost_str = format!("lost {}", lost);
+        let mut post_bar_width: usize = 2 + ok_str.len() + 1 + lost_str.len(); // "  " + ok + " " + lost
+        if pending > 0 {
+            post_bar_width += format!(" pending {}", pending).len();
+        }
+
+        // Calculate bar width from remaining space
+        let total_text_width = pre_bar_width + post_bar_width;
+        let available_width = udp_inner.width as usize;
+        let bar_width = if available_width > total_text_width + 5 {
+            available_width - total_text_width
+        } else {
+            10 // minimum bar width
+        };
+
+        // Ensure any loss shows at least one red segment
+        let lost_units = if lost > 0 {
+            ((lost as f64 / safe_total as f64) * bar_width as f64).ceil().max(1.0) as usize
+        } else {
+            0
+        };
+        let recv_units = ((safe_received as f64 / safe_total as f64) * bar_width as f64).floor() as usize;
+        let pending_units = bar_width.saturating_sub(recv_units + lost_units);
+
+        let bar_recv = "█".repeat(recv_units);
+        let bar_lost = "█".repeat(lost_units);
+        let bar_pending = "░".repeat(pending_units);
+
         let mut spans = vec![
             Span::styled(udp_status, Style::default().fg(Color::Yellow)),
             Span::raw(" "),
@@ -409,7 +445,7 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
             spans.push(Span::styled(quality_label, Style::default().fg(label_color)));
             if !mos_str.is_empty() {
                 spans.push(Span::raw(" ("));
-                spans.push(Span::styled(mos_str, Style::default().fg(label_color)));
+                spans.push(Span::styled(&mos_str, Style::default().fg(label_color)));
                 spans.push(Span::raw(") "));
             } else {
                 spans.push(Span::raw(" "));
@@ -418,21 +454,21 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
 
         spans.extend(vec![
             Span::styled(
-                format!("loss {:.1}%", udp_loss_pct),
+                loss_str,
                 Style::default().fg(if udp_loss_pct == 0.0 { Color::Green } else if udp_loss_pct < 2.5 { Color::Yellow } else { Color::Red }),
             ),
             Span::raw(" "),
-            Span::styled(format!("rtt {}", rtt_str), Style::default().fg(Color::Gray)),
+            Span::styled(rtt_display, Style::default().fg(Color::Gray)),
         ]);
 
         // Add jitter and reorder when available
         if !jitter_str.is_empty() {
             spans.push(Span::raw(" "));
-            spans.push(Span::styled(jitter_str, Style::default().fg(Color::Gray)));
+            spans.push(Span::styled(&jitter_str, Style::default().fg(Color::Gray)));
         }
         if !reorder_str.is_empty() && state.phase != crate::model::Phase::PacketLoss {
             spans.push(Span::raw(" "));
-            spans.push(Span::styled(reorder_str, Style::default().fg(Color::Gray)));
+            spans.push(Span::styled(&reorder_str, Style::default().fg(Color::Gray)));
         }
 
         spans.extend(vec![
@@ -441,9 +477,9 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
             Span::styled(bar_lost, Style::default().fg(Color::Red)),
             Span::styled(bar_pending, Style::default().fg(Color::DarkGray)),
             Span::raw("  "),
-            Span::styled(format!("ok {}", safe_received), Style::default().fg(Color::Green)),
+            Span::styled(ok_str, Style::default().fg(Color::Green)),
             Span::raw(" "),
-            Span::styled(format!("lost {}", lost), Style::default().fg(Color::Red)),
+            Span::styled(lost_str, Style::default().fg(Color::Red)),
         ]);
 
         if pending > 0 {
