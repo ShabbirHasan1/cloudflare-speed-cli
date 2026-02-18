@@ -144,11 +144,14 @@ pub async fn run_udp_like_loss_probe(
             std_socket.set_nonblocking(true)?;
             UdpSocket::from_std(std_socket)?
         } else {
-            UdpSocket::bind("0.0.0.0:0").await?
+            // Bind to appropriate address family based on target
+            let bind_addr = if addr.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+            UdpSocket::bind(bind_addr).await?
         }
     } else {
-        // Bind ephemeral UDP (default behavior)
-        UdpSocket::bind("0.0.0.0:0").await?
+        // Bind ephemeral UDP - match target address family
+        let bind_addr = if addr.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+        UdpSocket::bind(bind_addr).await?
     };
 
     sock.connect(addr).await?;
